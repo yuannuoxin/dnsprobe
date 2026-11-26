@@ -52,9 +52,14 @@
     TXT: 16,
     AAAA: 28,
     SRV: 33,
+    HTTPS: 65,
     CAA: 257,
   };
   const ALL_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'CAA'];
+  /** 伪类型：查 HTTPS 记录并解析 ech 参数，不参与「全部」 */
+  const ECH_TYPE = 'ECH';
+
+  const KEM_LABEL = { 0x20: 'X25519', 0x21: 'X448', 0x22: 'P-256', 0x23: 'P-384', 0x24: 'P-521' };
 
   const TYPE_LABEL = {
     1: 'A', 2: 'NS', 5: 'CNAME', 6: 'SOA', 12: 'PTR', 15: 'MX', 16: 'TXT',
@@ -110,13 +115,20 @@
     return value;
   }
 
-  function cleanData(raw) {
-    const parts = String(raw).match(/"(?:[^"\\]|\\.)*"/g);
-    if (parts && parts.length > 1 && String(raw).trim().startsWith('"')) {
+  function cleanData(raw, typeCode) {
+    const text = String(raw);
+
+    // SVCB/HTTPS 是 key=value 形式，部分解析商（阿里云）会把值加引号，只去掉值两端的引号
+    if (typeCode === 64 || typeCode === 65) {
+      return text.replace(/"([^"]*)"/g, '$1');
+    }
+
+    const parts = text.match(/"(?:[^"\\]|\\.)*"/g);
+    if (parts && parts.length > 1 && text.trim().startsWith('"')) {
       return parts.map((p) => p.slice(1, -1)).join(' ');
     }
-    if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) return raw.slice(1, -1);
-    return raw;
+    if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) return text.slice(1, -1);
+    return text;
   }
 
   function normalize(records) {
@@ -130,7 +142,7 @@
           type: TYPE_LABEL[code] ?? `TYPE${code}`,
           typeCode: code,
           ttl: typeof r.TTL === 'number' ? r.TTL : 0,
-          data: cleanData(r.data),
+          data: cleanData(r.data, code),
         };
       });
   }
@@ -274,13 +286,87 @@
     return `<span class="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-medium text-emerald-300">全部一致</span>`;
   }
 
+  /* ---------------- ECH 解析 ---------------- */
+
+  function echValueOf(data) {
+    const match = String(data).match(/ech=([A-Za-z0-9+/=_-]+)/);
+    return match ? match[1] : null;
+  }
+
+  /** 解 base64 的 ECHConfigList，取版本、KEM、公钥名等可读字段；结构异常就返回 null */
+  function parseEchConfig(b64) {
+    try {
+      const clean = String(b64).replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, '');
+      const pad = clean.length % 4 ? '='.repeat(4 - (clean.length % 4)) : '';
+      const bin = atob(clean + pad);
+      const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+
+      if (bytes.length < 6) return null;
+      const listLen = (bytes[0] << 8) | bytes[1];
+      const version = (bytes[2] << 8) | bytes[3];
+      const cfgLen = (bytes[4] << 8) | bytes[5];
+
+      let i = 6;
+      const end = Math.min(i + cfgLen, bytes.length);
+      if (i + 3 > end) return null;
+
+      const configId = bytes[i];
+      i += 1;
+      const kemId = (bytes[i] << 8) | bytes[i + 1];
+      i += 2;
+
+      if (i + 2 > end) return null;
+      const pkLen = (bytes[i] << 8) | bytes[i + 1];
+      i += 2;
+      if (i + pkLen > end) return null;
+      i += pkLen;
+
+      if (i + 2 > end) return null;
+      const suitesLen = (bytes[i] << 8) | bytes[i + 1];
+      i += 2;
+      if (i + suitesLen > end) return null;
+      i += suitesLen;
+
+      if (i >= end) return null;
+      const maxNameLength = bytes[i];
+      i += 1;
+      if (i >= end) return null;
+      const nameLen = bytes[i];
+      i += 1;
+      if (i + nameLen > end) return null;
+
+      return {
+        bytes: bytes.length,
+        listLen,
+        version,
+        configId,
+        kemId,
+        kem: KEM_LABEL[kemId] ?? `0x${kemId.toString(16).padStart(4, '0')}`,
+        publicName: String.fromCharCode(...bytes.subarray(i, i + nameLen)),
+        maxNameLength,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** HTTPS/SVCB 的 ech 是一长串 base64，展示时截断，复制仍取完整值 */
+  function shortenEchText(text) {
+    return String(text).replace(/ech=([A-Za-z0-9+/=_-]{26})[A-Za-z0-9+/=_-]+/g, 'ech=$1…');
+  }
+
+  function shortenValue(record) {
+    if (record.typeCode !== 64 && record.typeCode !== 65) return record.data;
+    return shortenEchText(record.data);
+  }
+
   /* ---------------- 渲染 ---------------- */
 
   function renderRecord(record) {
     return `
       <div class="group flex items-start gap-2 rounded-md px-1.5 py-1 transition hover:bg-white/[0.045]">
         <span class="mt-[1px] shrink-0 rounded border border-white/10 bg-white/[0.06] px-1.5 py-[1px] font-mono text-[10px] leading-4 text-slate-400">${esc(record.type)}</span>
-        <code class="min-w-0 flex-1 break-all font-mono text-[12.5px] leading-[1.55] text-slate-200">${esc(record.data)}</code>
+        <code class="min-w-0 flex-1 break-all font-mono text-[12.5px] leading-[1.55] text-slate-200">${esc(shortenValue(record))}</code>
         <span class="shrink-0 pt-[2px] font-mono text-[10px] tabular-nums text-slate-500">${esc(record.ttl)}s</span>
         <button type="button" data-copy="${esc(record.data)}" title="复制记录值" aria-label="复制记录值"
           class="copy-btn shrink-0 rounded p-[3px] text-slate-500 opacity-0 transition hover:text-cyan-300 focus-visible:opacity-100 group-hover:opacity-100">
@@ -347,7 +433,7 @@
             return `<span class="inline-flex max-w-full flex-wrap items-center gap-x-1.5 rounded-md border border-white/10 bg-white/[0.05] px-2 py-[3px] text-[11px] text-slate-300">
               <span class="font-medium text-slate-200">${esc(bucket.vendors.join(' / '))}</span>
               <span class="text-slate-500">→ ${bucket.records.length} 条</span>
-              ${values.length ? `<span class="w-full break-all font-mono text-[10.5px] text-slate-500">${esc(preview)}</span>` : ''}
+              ${values.length ? `<span class="w-full break-all font-mono text-[10.5px] text-slate-500">${esc(shortenEchText(preview))}</span>` : ''}
             </span>`;
           })
           .join('');
@@ -373,6 +459,89 @@
           </div>
         </div>
         ${rows}
+      </div>`;
+  }
+
+  function analyzeEch(data) {
+    return (data.resolvers || []).map((resolver) => {
+      const group = (resolver.groups || []).find((g) => g.type === 'HTTPS') || null;
+      if (!group) return { resolver, state: 'missing' };
+      if (!group.ok) return { resolver, state: 'error', error: group.error };
+
+      const record = group.answers.find((a) => echValueOf(a.data));
+      if (!record) return { resolver, state: group.status === 3 ? 'nxdomain' : 'none' };
+
+      const b64 = echValueOf(record.data);
+      return { resolver, state: 'ok', b64, config: parseEchConfig(b64) };
+    });
+  }
+
+  const ECH_PILL = {
+    ok: ['已发布', 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'],
+    none: ['无 ech 参数', 'border-white/15 bg-white/[0.06] text-slate-400'],
+    error: ['查询失败', 'border-rose-400/30 bg-rose-400/10 text-rose-300'],
+    nxdomain: ['域名不存在', 'border-amber-400/30 bg-amber-400/10 text-amber-300'],
+    missing: ['未查询', 'border-white/15 bg-white/[0.06] text-slate-400'],
+  };
+
+  function renderEchPanel(data) {
+    const rows = analyzeEch(data);
+    const published = rows.filter((r) => r.state === 'ok');
+    const total = rows.length;
+
+    const badge = published.length
+      ? `${published.length}/${total} 家返回 ech 配置`
+      : `未发现 ech 配置 · 0/${total}`;
+    const badgeClass = published.length
+      ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
+      : 'border-amber-400/30 bg-amber-400/10 text-amber-300';
+
+    const configIds = published.map((r) => r.config?.configId).filter((v) => typeof v === 'number');
+    const mixedIds = new Set(configIds).size > 1;
+
+    const body = rows
+      .map((row) => {
+        const [label, cls] = ECH_PILL[row.state] || ECH_PILL.missing;
+        let detail = '';
+        if (row.state === 'ok') {
+          detail = row.config
+            ? `public_name=${esc(row.config.publicName)} · 配置 ${row.config.bytes}B · ${esc(row.config.kem)} · config id ${row.config.configId}`
+            : `ech 值 ${row.b64.length} 字符，结构无法解析`;
+        } else if (row.state === 'error') {
+          detail = esc(row.error);
+        } else if (row.state === 'none') {
+          detail = 'HTTPS 记录存在，但没有 ech 参数';
+        } else if (row.state === 'nxdomain') {
+          detail = '该域名没有 HTTPS 记录';
+        }
+
+        return `
+          <div class="rounded-lg border border-white/5 bg-white/[0.02] px-2.5 py-2">
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span class="h-1.5 w-1.5 shrink-0 rounded-full" style="background:${esc(row.resolver.color)}"></span>
+              <span class="text-[12px] text-slate-200">${esc(row.resolver.vendor)}</span>
+              <span class="rounded-full border px-1.5 py-[1px] text-[10px] font-medium ${cls}">${label}</span>
+            </div>
+            ${detail ? `<p class="mt-1 break-all font-mono text-[10.5px] leading-[1.6] text-slate-500">${detail}</p>` : ''}
+          </div>`;
+      })
+      .join('');
+
+    return `
+      <div class="mb-3 overflow-hidden rounded-2xl border border-indigo-400/25 bg-indigo-500/[0.055]">
+        <div class="flex flex-wrap items-center gap-2.5 border-b border-indigo-400/15 px-4 py-3">
+          <svg class="h-4 w-4 shrink-0 text-indigo-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+            <path d="M12 3l7 3v6c0 4.2-2.9 7.6-7 9-4.1-1.4-7-4.8-7-9V6l7-3z"></path><path d="M9.2 12.2l2 2 3.6-3.8"></path>
+          </svg>
+          <span class="text-[13px] font-medium text-white">ECH 检测</span>
+          <span class="max-w-full break-all font-mono text-[12px] text-slate-400">${esc(data.name)}</span>
+          <span class="ml-auto rounded-full border px-2.5 py-1 text-[11px] font-medium ${badgeClass}">${badge}</span>
+        </div>
+        <div class="grid gap-2 px-4 py-3 md:grid-cols-2">${body}</div>
+        <p class="border-t border-indigo-400/10 px-4 py-2.5 text-[11px] leading-relaxed text-slate-500">
+          这里只判定 DNS 里的 ECH 声明：真正握手能否用上，还要求客户端支持 TLS 1.3 并通过 DoH 取到配置，中间网络也可能会阻断。
+          ${mixedIds ? '各家 config id 不同，说明缓存到的配置代次不一样，并不代表配置错误。' : ''}
+        </p>
       </div>`;
   }
 
@@ -408,6 +577,7 @@
   function render(data) {
     const consensus = consensusOf(data);
     resultsEl.innerHTML = `
+      ${data.echMode ? renderEchPanel(data) : ''}
       ${renderSummary(data, consensus)}
       <div class="mt-3 grid gap-3 md:grid-cols-2">${data.resolvers.map(renderCard).join('')}</div>
       ${allFailed(data) ? `<p class="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/[0.05] px-4 py-3 text-[12px] leading-relaxed text-rose-300/85">所有解析商都失败了。查询由浏览器直接发出，若你的网络无法访问境外 DoH 端点，可先确认代理是否覆盖浏览器流量；阿里云通常仍可正常返回。</p>` : ''}
@@ -512,7 +682,8 @@
       return;
     }
 
-    const types = currentType === 'ALL' ? ALL_TYPES : [currentType];
+    const echMode = currentType === ECH_TYPE;
+    const types = echMode ? ['HTTPS'] : currentType === 'ALL' ? ALL_TYPES : [currentType];
 
     running = true;
     submitBtn.disabled = true;
@@ -520,7 +691,7 @@
     renderLoading();
 
     const started = performance.now();
-    lastQuery = { value, resolvers, types };
+    lastQuery = { value, resolvers, types, echMode };
 
     const tasks = [];
     const owners = [];
@@ -544,6 +715,7 @@
     const data = {
       name,
       types,
+      echMode,
       elapsed,
       resolvers: resolvers.map((r) => {
         const own = byResolver.get(r.id) || [];
