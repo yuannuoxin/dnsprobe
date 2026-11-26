@@ -42,6 +42,77 @@
     },
   ];
 
+  const CUSTOM_STORE = 'dnsprobe.customDoh';
+  const CUSTOM_COLORS = ['#22D3EE', '#34D399', '#F472B6', '#FBBF24', '#A78BFA', '#60A5FA'];
+
+  /* ---------------- 自定义 DoH 端点 ---------------- */
+
+  /** 把用户粘贴的地址归一成一个可查询的 DoH JSON 端点；不合格返回 null */
+  function describeCustomDoh(raw) {
+    let url;
+    try {
+      url = new URL(String(raw ?? '').trim());
+    } catch {
+      return null;
+    }
+    if (url.protocol !== 'https:' || !url.hostname) return null;
+
+    url.hash = '';
+    url.search = '';
+    let path = url.pathname.replace(/\/+$/, '');
+    if (!path) path = '/dns-query';
+    url.pathname = path;
+    const doh = url.toString();
+    const host = url.hostname;
+    const first = host.split('.')[0];
+
+    const brand = host.endsWith('cloudflare-gateway.com')
+      ? 'CF Gateway'
+      : host.endsWith('nextdns.io')
+        ? 'NextDNS'
+        : null;
+    const label = brand || first;
+
+    return {
+      id: `custom:${doh}`,
+      name: brand ? 'Cloudflare Gateway' : `自定义 · ${host}`,
+      vendor: label.length > 14 ? `${label.slice(0, 13)}…` : label,
+      host: brand ? first : host,
+      doh,
+      note: '自定义 DoH 端点 · 需返回 JSON 且放行 CORS',
+      color: CUSTOM_COLORS[RESOLVERS.filter((r) => r.custom).length % CUSTOM_COLORS.length],
+      custom: true,
+    };
+  }
+
+  function loadCustomResolvers() {
+    let list;
+    try {
+      list = JSON.parse(localStorage.getItem(CUSTOM_STORE) || '[]');
+    } catch {
+      return;
+    }
+    if (!Array.isArray(list)) return;
+
+    for (const item of list.slice(0, 6)) {
+      const described = describeCustomDoh(typeof item === 'string' ? item : '');
+      if (!described || RESOLVERS.some((r) => r.doh === described.doh)) continue;
+      RESOLVERS.push(described);
+      enabledIds.add(described.id);
+    }
+  }
+
+  function saveCustomResolvers() {
+    try {
+      localStorage.setItem(
+        CUSTOM_STORE,
+        JSON.stringify(RESOLVERS.filter((r) => r.custom).map((r) => r.doh)),
+      );
+    } catch {
+      /* 隐身模式下写不进去，忽略即可 */
+    }
+  }
+
   const RECORD_TYPES = {
     A: 1,
     NS: 2,
@@ -620,44 +691,106 @@
   const submitBtn = $('#submit');
   const submitText = $('#submit-text');
   const resultsEl = $('#results');
+  const customInput = $('#custom-doh');
+  const customAddBtn = $('#custom-add');
 
   let currentType = 'A';
   let lastQuery = null;
   let lastData = null;
   let running = false;
+  const enabledIds = new Set(RESOLVERS.map((r) => r.id));
 
   function selectedResolvers() {
-    return $$('#resolver-chips input')
-      .filter((box) => box.checked)
-      .map((box) => RESOLVERS.find((r) => r.id === box.value))
-      .filter(Boolean);
+    return RESOLVERS.filter((r) => enabledIds.has(r.id));
   }
 
   function renderResolverChips() {
     const container = $('#resolver-chips');
     container.innerHTML = RESOLVERS.map(
       (r) => `
-        <label class="resolver-chip" data-id="${r.id}" data-on="true" title="${esc(r.name)} · ${esc(r.note)}">
-          <input type="checkbox" class="sr-only" name="resolver" value="${r.id}" checked />
+        <label class="resolver-chip" data-id="${r.id}" data-on="${enabledIds.has(r.id)}" title="${esc(r.name)} · ${esc(r.note)}">
+          <input type="checkbox" class="sr-only" name="resolver" value="${r.id}" ${enabledIds.has(r.id) ? 'checked' : ''} />
           <span class="h-1.5 w-1.5 shrink-0 rounded-full" style="background:${r.color}"></span>
           <span>${esc(r.vendor)}</span>
           <span class="font-mono text-[10px] font-normal text-slate-500">${esc(r.host)}</span>
+          ${
+            r.custom
+              ? `<button type="button" class="chip-del -mr-0.5 rounded px-0.5 text-[12px] leading-none text-slate-500 transition hover:text-rose-300" data-remove="${esc(r.id)}" title="移除该端点">×</button>`
+              : ''
+          }
         </label>`,
     ).join('');
 
     $$('#resolver-chips label').forEach((label) => {
       const box = $('input', label);
       box.addEventListener('change', () => {
-        const checked = $$('#resolver-chips input').filter((b) => b.checked);
-        if (!checked.length) {
+        if (!box.checked && enabledIds.size === 1) {
           box.checked = true;
           label.dataset.on = 'true';
           showError('至少保留一家解析商');
           return;
         }
+        if (box.checked) enabledIds.add(box.value);
+        else enabledIds.delete(box.value);
         label.dataset.on = String(box.checked);
       });
     });
+
+    $$('#resolver-chips .chip-del').forEach((btn) => {
+      btn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        removeCustomResolver(btn.dataset.remove);
+      });
+    });
+  }
+
+  function removeCustomResolver(id) {
+    const index = RESOLVERS.findIndex((r) => r.id === id && r.custom);
+    if (index === -1) return;
+
+    RESOLVERS.splice(index, 1);
+    enabledIds.delete(id);
+    saveCustomResolvers();
+    if (!enabledIds.size && RESOLVERS.length) enabledIds.add(RESOLVERS[0].id);
+    renderResolverChips();
+    if (lastQuery) run(lastQuery.value);
+  }
+
+  function submitCustomResolver(raw) {
+    const value = String(raw ?? '').trim();
+    if (!value) {
+      setCustomMsg('先填一个 DoH 端点地址');
+      return;
+    }
+
+    const described = describeCustomDoh(value);
+    if (!described) {
+      setCustomMsg('只接受 https 的 DoH JSON 端点，形如 https://host/dns-query');
+      return;
+    }
+    if (RESOLVERS.some((r) => r.doh === described.doh)) {
+      setCustomMsg('这个端点已经在列表里了');
+      return;
+    }
+
+    RESOLVERS.push(described);
+    enabledIds.add(described.id);
+    saveCustomResolvers();
+    renderResolverChips();
+    customInput.value = '';
+    setCustomMsg(`已加入 ${described.host}`);
+    if (lastQuery) run(lastQuery.value);
+  }
+
+  function setCustomMsg(text) {
+    const el = $('#custom-msg');
+    if (!el) return;
+    el.textContent = text;
+    clearTimeout(setCustomMsg.timer);
+    setCustomMsg.timer = setTimeout(() => {
+      el.textContent = '';
+    }, 4500);
   }
 
   async function run(rawValue) {
@@ -755,6 +888,13 @@
     run(domainInput.value);
   });
 
+  customAddBtn.addEventListener('click', () => submitCustomResolver(customInput.value));
+  customInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    submitCustomResolver(customInput.value);
+  });
+
   async function copyText(value) {
     try {
       await navigator.clipboard.writeText(value);
@@ -794,6 +934,7 @@
     }
   });
 
+  loadCustomResolvers();
   renderResolverChips();
   domainInput.value = 'example.com';
   run('example.com');

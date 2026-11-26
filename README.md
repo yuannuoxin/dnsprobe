@@ -59,6 +59,7 @@ npm run dev        # http://127.0.0.1:3000
 - **ECH 检测**：`ECH` 是一个伪类型，实际查 HTTPS 记录，再把 `ech=` 的 base64 解成 ECHConfigList，读出 `public_name`、KEM（X25519 等）、config id 与配置字节数。各家 config id 不一致只说明缓存到的配置代次不同，不影响「是否支持」的判定。
 - **ech 值截断展示**：base64 长度近百字符，卡片里只显示前 26 位加省略号，复制按钮与原始 JSON 面板仍给完整值。
 - **ECH 与 HTTPS 不并入「全部」**：避免「全部」模式的请求数继续膨胀，需要时单独点选。
+- **自定义 DoH 端点**：输入框粘贴任意 `https://host/dns-query` 即可加入解析商列表，存进 `localStorage`（键 `dnsprobe.customDoh`），刷新后仍在；点 chip 上的 `×` 移除。前端只吃得下返回 JSON 且放行 CORS 的端点——Cloudflare Zero Trust 的 Gateway 地址（`https://<location>.cloudflare-gateway.com/dns-query`）实测带 `Access-Control-Allow-Origin: *`，可以直接用；NextDNS、OpenDNS 没有跨域头，粘进来只会显示「跨域被拒」。
 - **无任何记录**：没有服务端，也就没有日志；查询直接发往解析商，是否记录取决于各家隐私政策。
 
 ## 部署
