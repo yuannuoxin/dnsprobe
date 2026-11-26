@@ -261,6 +261,24 @@
   .z-40 {
     z-index: 40;
   }
+  .container {
+    width: 100%;
+    @media (width >= 40rem) {
+      max-width: 40rem;
+    }
+    @media (width >= 48rem) {
+      max-width: 48rem;
+    }
+    @media (width >= 64rem) {
+      max-width: 64rem;
+    }
+    @media (width >= 80rem) {
+      max-width: 80rem;
+    }
+    @media (width >= 96rem) {
+      max-width: 96rem;
+    }
+  }
   .mx-auto {
     margin-inline: auto;
   }
@@ -353,6 +371,9 @@
   }
   .h-\[560px\] {
     height: 560px;
+  }
+  .min-h-7 {
+    min-height: calc(var(--spacing) * 7);
   }
   .min-h-screen {
     min-height: 100vh;

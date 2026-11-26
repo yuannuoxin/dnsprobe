@@ -1,147 +1,75 @@
-# DNS Probe · 五家公共 DNS 解析对比
+# DNS Probe · 四家公共 DNS 解析对比（纯前端）
 
-输入一个域名，同时向 Google、Cloudflare、阿里云、腾讯 DNSPod、360 安全 DNS 发起 DNS-over-HTTPS 查询，并列展示各自的解析记录，并自动比对哪几家一致、哪几家不同。
+输入一个域名，浏览器直接通过 DNS-over-HTTPS 并发查询 Google、Cloudflare、阿里云、DNS.SB 的解析结果，并列展示各自的记录，并自动标出哪几家一致、哪几家不同。
 
-参考了 [ipv4.ws](https://ipv4.ws/) 的信息组织方式，但把「单解析商切换」换成了「多解析商并排 + 一致性比对」，查询在服务端完成，规避浏览器的 CORS 限制。
+**没有后端、没有中转服务器**：查询请求由你的浏览器直接发往各家 DoH 端点，页面本身是三个静态文件。
 
 ## 技术栈
 
-- **Hono**：路由与页面渲染，同一份应用代码可跑 Node 和 Cloudflare Workers
-- **Tailwind CSS v4**：样式，构建到 `public/styles.css`
-- **tsx**：本地直接运行 TypeScript
-- **undici ProxyAgent**：本地开发时让出站请求走代理
+- 原生 HTML + JavaScript，零运行时依赖
+- **Tailwind CSS v4**（CLI 构建到 `public/styles.css`）
+- 本地预览用 Node 内置 `http` 起一个静态服务器，不参与任何查询逻辑
 
 ## 目录结构
 
 ```
-src/
-  index.ts             Node 入口（静态资源、出站代理、监听端口）
-  worker.ts            Cloudflare Workers 入口
-  app.ts               Hono 应用：页面 + /api/dns + /api/resolvers
-  page.ts              页面 HTML（含解析商与记录类型的选项）
-  app.css              Tailwind 入口与自定义样式
-  dns/
-    resolvers.ts       五家解析商定义（DoH 端点、标识色）
-    doh.ts             DoH 查询、记录归一化、并发限流、一致性数据结构
 public/
-  styles.css           Tailwind 构建产物
-  app.js               前端交互（查询、渲染、复制、导出）
+  index.html     页面
+  app.js         解析商定义、DoH 查询、一致性比对、渲染
+  styles.css     Tailwind 构建产物
+src/
+  app.css        Tailwind 入口与自定义样式
 scripts/
-  dev.mjs              一条命令同时跑 Tailwind watch 与 tsx watch
+  dev.mjs        静态服务器 + Tailwind watch
 ```
 
 ## 本地运行
 
 ```bash
 npm install
-npm run dev          # http://127.0.0.1:3000
+npm run dev        # http://127.0.0.1:3000
 ```
 
-`npm run dev` 会并行启动样式监听和服务，改 `src/app.css` 或 `src/**` 都会自动重建。
+`npm run dev` 会同时起静态服务与样式监听，改 `src/app.css` 或页面里的类名都会自动重建 `styles.css`。
 
-也可以用 `npm start` 只起服务（前提是 `public/styles.css` 已构建过）。
+## 为什么只有四家
 
-### 出站代理（重要）
+纯前端方案下，浏览器能否查询完全取决于对方是否放行 CORS。实测（Chrome 内发起 `fetch`，带 `Accept: application/dns-json`）：
 
-Google / Cloudflare 的 DoH 端点在部分网络（尤其是国内家宽）会被阻断，直接连会超时。项目通过 `.env` 里的代理变量让服务端出站走代理：
+| 解析商 | DoH JSON | CORS | 浏览器可查 |
+| --- | --- | --- | --- |
+| Google `dns.google` | ✅ | `Access-Control-Allow-Origin: *` | ✅ |
+| Cloudflare `cloudflare-dns.com` | ✅ | `*` | ✅ |
+| 阿里云 `dns.alidns.com` | ✅ | `*` | ✅ |
+| DNS.SB `doh.sb` | ✅ | `*` | ✅ |
+| 腾讯 DNSPod `doh.pub` | ✅ | 无跨域头 | ❌ 被浏览器拦下 |
+| 360 安全 DNS `doh.360.cn` | ✅ | 无跨域头 | ❌ 被浏览器拦下 |
+| Quad9 `dns.quad9.net` | ❌ 不支持 JSON 接口 | 错误页无跨域头 | ❌ |
 
-```ini
-HTTP_PROXY=http://127.0.0.1:10808
-HTTPS_PROXY=http://127.0.0.1:10808
-```
-
-复制 `.env.example` 为 `.env` 改成自己的代理地址即可；`.env` 已在 `.gitignore` 中。没有代理时删掉该文件，服务会直连——此时阿里云、腾讯、360 正常，境外三家多半会显示「请求超时」。
-
-注意：浏览器侧的 `NODE_USE_ENV_PROXY` 这类开关在进程启动后才设是无效的，所以这里直接用 undici 的 `ProxyAgent` 显式接管全局 dispatcher，不依赖启动顺序。
-
-## 接口
-
-```bash
-# 单类型
-curl "http://127.0.0.1:3000/api/dns?name=example.com&type=A"
-
-# 八种记录一次查完
-curl "http://127.0.0.1:3000/api/dns?name=qq.com&type=ALL"
-
-# 只查指定解析商（逗号分隔，id 见 /api/resolvers）
-curl "http://127.0.0.1:3000/api/dns?name=github.com&type=A&resolvers=alidns,dnspod"
-```
-
-参数：
-
-| 参数 | 说明 |
-| --- | --- |
-| `name` | 域名，可粘贴完整 URL，服务端会去掉协议和路径并转 punycode |
-| `type` | `A` `AAAA` `CNAME` `MX` `TXT` `NS` `SOA` `CAA`，或 `ALL` |
-| `resolvers` | 解析商 id，省略则全部查询 |
-
-返回结构（截断）：
-
-```json
-{
-  "name": "example.com",
-  "types": ["A"],
-  "elapsed": 874,
-  "resolvers": [
-    {
-      "id": "google",
-      "name": "Google Public DNS",
-      "host": "8.8.8.8",
-      "color": "#4285F4",
-      "ok": true,
-      "groups": [
-        {
-          "type": "A", "ok": true, "status": 0, "statusText": "NOERROR", "ms": 874,
-          "answers": [{ "name": "example.com.", "type": "A", "typeCode": 1, "ttl": 300, "data": "104.20.23.154" }],
-          "authority": [], "error": null
-        }
-      ]
-    }
-  ]
-}
-```
-
-一致性比对在前端完成：按 `typeCode:data` 排序拼成签名后分组，签名相同即视为一致，所以不需要额外请求。
+腾讯与 360 即使请求带上 `Origin` 也不返回跨域头，Quad9 直接回 `HTTP 400 DoH unable to decode BASE64-URL`，所以四家是「浏览器能直连」的上限。要覆盖更多解析商，只能重新引入服务端转发。
 
 ## 实现要点
 
-- **并发限制 6**：Cloudflare Workers 单次请求最多 6 个并发出站连接，任务池统一压到 6，`ALL` 模式（5 家 × 8 类 = 40 个子请求）也不会触发连接数报错。
-- **超时 7 秒**：每个 DoH 请求独立超时，单家挂掉不影响其他家，失败会在卡片里显示具体原因（超时 / 网络不可达 / HTTP 状态码）。
-- **记录归一化**：DoH 各家返回的类型码、`TTL`、`data` 统一成同一结构；TXT 的外层引号会被去掉；空答案若伴随 `NXDOMAIN` 会单独提示。
-- **无服务端缓存**：查询结果不落库、不做跨请求缓存，避免「刚改完解析但页面还是旧结果」的误判。
+- **按查询类型过滤答案**：DNS.SB 开启 DNSSEC，`Answer` 里会附带 `RRSIG`（类型码 46），既污染列表又会让一致性比对误判成「两家结果不同」。现在只保留目标类型与 CNAME 链路，其余丢弃。
+- **超时 8 秒**：每个请求独立 `AbortSignal.timeout`，单家挂掉不影响其他家；失败按原因分列（超时 / 跨域被拒或不可达 / HTTP 状态码）。
+- **一致性比对在前端算**：把每家答案按 `typeCode:data` 排序拼成签名，签名相同即视为一致，不需要额外请求。
+- **TTL 不参与比对**：不同解析商缓存到期时间不同，只比数据本身。
+- **输入归一化**：支持粘贴完整 URL，自动去协议与路径、转 punycode、去尾点；非法域名直接提示。
+- **无任何记录**：没有服务端，也就没有日志；查询直接发往解析商，是否记录取决于各家隐私政策。
 
-## 部署到 Cloudflare Workers
+## 部署
+
+纯静态，任意静态托管都能用。Cloudflare Pages：
 
 ```bash
-npm run build:css     # 先把 Tailwind 编译到 public/styles.css
-npx wrangler login
-npm run deploy
+npm run build:css
+npm run deploy          # npx wrangler pages deploy public --project-name=dnsprobe
 ```
 
-`wrangler.toml`：
-
-```toml
-name = "dnsprobe"
-main = "src/worker.ts"
-compatibility_date = "2026-01-01"
-
-[assets]
-directory = "./public"
-binding = "ASSETS"
-run_worker_first = true
-```
-
-`run_worker_first = true` 是必需的：静态资源层会先接管请求，`/api/dns` 没有对应文件会被直接返回 404。Worker 里非 API 路径交给 `env.ASSETS`，`/styles.css` 与 `/app.js` 由此提供。
-
-GitHub 集成部署时填：
-
-- **Install command**：`npm ci`
-- **Build command**：`npm run build:css && npx wrangler deploy`
-
-部署到边缘后出口在 Cloudflare 节点，五家解析商都能直连，不需要代理配置。
+或在控制台 **Workers & Pages → Create → Pages → Upload assets** 直接把 `public/` 拖进去。注意部署前先执行一次 `npm run build:css`，保证 `public/styles.css` 是最新的。
 
 ## 已知限制
 
-- 腾讯 DNSPod 的 DoH 接口不接受 `CAA`（类型码 257）查询，会返回 HTTP 400，页面会如实标注「未接受该类型查询」。
-- 各家递归线路不同，CDN 就近解析下 A 记录出现 2 条 vs 3 条这类差异是正常现象，正是这个工具想暴露的信息。
-- `ALL` 模式下 40 个子请求约 2～3 秒，属于正常范围。
+- 查询受浏览器所在网络影响：境外 DoH 端点在国内网络常被阻断，此时卡片会显示「请求超时 / 跨域被拒或网络不可达」。走代理访问本站即可恢复。
+- CDN 就近解析下 A 记录出现 2 条 vs 3 条这类差异是正常现象，正是这个工具想暴露的信息。
+- 「全部」模式一次发出 4 × 8 = 32 个请求，浏览器会按每个域名 6 条连接自动排队，通常 1 秒内完成。

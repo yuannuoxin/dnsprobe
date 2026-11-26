@@ -1,19 +1,73 @@
 (() => {
   'use strict';
 
+  /* ---------------- 解析商（均可从浏览器直连，返回 JSON 且放行 CORS） ---------------- */
+
+  const RESOLVERS = [
+    {
+      id: 'google',
+      name: 'Google Public DNS',
+      vendor: 'Google',
+      host: '8.8.8.8',
+      doh: 'https://dns.google/resolve',
+      note: '全球任播 · 不记录关联信息',
+      color: '#4285F4',
+    },
+    {
+      id: 'cloudflare',
+      name: 'Cloudflare',
+      vendor: 'Cloudflare',
+      host: '1.1.1.1',
+      doh: 'https://cloudflare-dns.com/dns-query',
+      note: '隐私优先 · 以速度见长',
+      color: '#F6821F',
+    },
+    {
+      id: 'alidns',
+      name: '阿里云 AliDNS',
+      vendor: 'Aliyun',
+      host: '223.5.5.5',
+      doh: 'https://dns.alidns.com/resolve',
+      note: '国内低延迟 · 支持 ECS 调度',
+      color: '#FF6A00',
+    },
+    {
+      id: 'dnssb',
+      name: 'DNS.SB',
+      vendor: 'DNS.SB',
+      host: '185.222.222.222',
+      doh: 'https://doh.sb/dns-query',
+      note: '无日志 · 海外公共解析',
+      color: '#8B5CF6',
+    },
+  ];
+
+  const RECORD_TYPES = {
+    A: 1,
+    NS: 2,
+    CNAME: 5,
+    SOA: 6,
+    PTR: 12,
+    MX: 15,
+    TXT: 16,
+    AAAA: 28,
+    SRV: 33,
+    CAA: 257,
+  };
+  const ALL_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'CAA'];
+
+  const TYPE_LABEL = {
+    1: 'A', 2: 'NS', 5: 'CNAME', 6: 'SOA', 12: 'PTR', 15: 'MX', 16: 'TXT',
+    28: 'AAAA', 33: 'SRV', 43: 'DS', 64: 'SVCB', 65: 'HTTPS', 257: 'CAA',
+  };
+  const STATUS_TEXT = { 0: 'NOERROR', 1: 'FORMERR', 2: 'SERVFAIL', 3: 'NXDOMAIN', 4: 'NOTIMP', 5: 'REFUSED' };
+
+  const TIMEOUT = 8000;
+
+  /* ---------------- 小工具 ---------------- */
+
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
-
-  const form = $('#query-form');
-  const domainInput = $('#domain');
-  const submitBtn = $('#submit');
-  const submitText = $('#submit-text');
-  const resultsEl = $('#results');
-
-  let currentType = 'A';
-  let lastQuery = null;
-  let lastData = null;
-  let running = false;
 
   const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ESCAPES[c]);
@@ -24,61 +78,131 @@
     ERROR: 'border-rose-400/30 bg-rose-400/10 text-rose-300',
   };
 
-  /* ---------- 查询 ---------- */
+  function timeoutSignal(ms) {
+    return typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+      ? AbortSignal.timeout(ms)
+      : undefined;
+  }
 
-  async function run(rawValue) {
-    if (running) return;
-
-    const value = (rawValue ?? domainInput.value).trim();
-    if (!value) {
-      showError('请输入要查询的域名');
-      domainInput.focus();
-      return;
-    }
-
-    const resolvers = $$('.resolver-chip input')
-      .filter((box) => box.checked)
-      .map((box) => box.value);
-
-    if (!resolvers.length) {
-      showError('请至少选择一家解析商');
-      return;
-    }
-
-    running = true;
-    submitBtn.disabled = true;
-    submitText.textContent = '查询中';
-    renderLoading();
-
-    lastQuery = { value, resolvers };
+  /** 用户输入 → 纯域名：去协议、去路径、转 punycode、去尾点 */
+  function normalizeDomain(input) {
+    let value = String(input ?? '').trim();
+    if (!value) return null;
 
     try {
-      const params = new URLSearchParams({
-        name: value,
-        type: currentType,
-        resolvers: resolvers.join(','),
-      });
-      const res = await fetch(`/api/dns?${params.toString()}`);
-      const data = await res.json();
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
+        value = new URL(value).hostname;
+      } else {
+        value = value.split('/')[0].split('?')[0].split('#')[0];
+        value = new URL(`http://${value}`).hostname;
+      }
+    } catch {
+      return null;
+    }
 
-      if (!res.ok || data.error) {
-        showError(data.error || `查询失败（HTTP ${res.status}）`);
-        return;
+    value = value.replace(/\.$/, '').toLowerCase();
+    if (value.length > 253 || !value.includes('.')) return null;
+
+    for (const label of value.split('.')) {
+      if (!label || label.length > 63) return null;
+      if (!/^[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?$/.test(label)) return null;
+    }
+    return value;
+  }
+
+  function cleanData(raw) {
+    const parts = String(raw).match(/"(?:[^"\\]|\\.)*"/g);
+    if (parts && parts.length > 1 && String(raw).trim().startsWith('"')) {
+      return parts.map((p) => p.slice(1, -1)).join(' ');
+    }
+    if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) return raw.slice(1, -1);
+    return raw;
+  }
+
+  function normalize(records) {
+    if (!Array.isArray(records)) return [];
+    return records
+      .filter((r) => typeof r?.data === 'string')
+      .map((r) => {
+        const code = typeof r.type === 'number' ? r.type : 0;
+        return {
+          name: r.name ?? '',
+          type: TYPE_LABEL[code] ?? `TYPE${code}`,
+          typeCode: code,
+          ttl: typeof r.TTL === 'number' ? r.TTL : 0,
+          data: cleanData(r.data),
+        };
+      });
+  }
+
+  function describeError(err) {
+    const name = err?.name ?? '';
+    if (name === 'TimeoutError' || name === 'AbortError') {
+      return `请求超时（${TIMEOUT / 1000}s 无响应，该端点可能被当前网络阻断）`;
+    }
+    if (name === 'TypeError') {
+      return '浏览器未能完成请求（跨域被拒或网络不可达）';
+    }
+    return err?.message || '查询失败';
+  }
+
+  /* ---------------- 查询 ---------------- */
+
+  async function queryOne(resolver, name, type) {
+    const started = performance.now();
+    const base = { type, status: -1, statusText: 'ERROR', answers: [], authority: [], error: null };
+    const ms = () => Math.round(performance.now() - started);
+
+    try {
+      const url = new URL(resolver.doh);
+      url.searchParams.set('name', name);
+      url.searchParams.set('type', String(RECORD_TYPES[type]));
+
+      const res = await fetch(url.toString(), {
+        headers: { accept: 'application/dns-json' },
+        signal: timeoutSignal(TIMEOUT),
+      });
+
+      if (!res.ok) {
+        return {
+          ...base,
+          ok: false,
+          ms: ms(),
+          error: res.status === 400 ? `该解析商未接受 ${type} 类型查询（HTTP 400）` : `HTTP ${res.status}`,
+        };
       }
 
-      lastData = data;
-      domainInput.value = data.name;
-      render(data);
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('json')) {
+        return { ...base, ok: false, ms: ms(), error: `返回非 JSON 内容（${contentType || 'unknown'}）` };
+      }
+
+      const body = await res.json();
+      const status = typeof body.Status === 'number' ? body.Status : 0;
+      const wanted = RECORD_TYPES[type];
+
+      // 只保留本次查询的类型，以及 CNAME 链路；过滤开启 DNSSEC 时附带的 RRSIG/NSEC，
+      // 否则既是噪声，又会让一致性比对误判成「两家结果不同」
+      const answers = normalize(body.Answer).filter(
+        (r) => r.typeCode === wanted || r.typeCode === 5,
+      );
+
+      return {
+        type,
+        ok: true,
+        status,
+        statusText: STATUS_TEXT[status] ?? `STATUS ${status}`,
+        ms: ms(),
+        answers,
+        authority: normalize(body.Authority),
+        error: null,
+      };
     } catch (err) {
-      showError(`请求失败：${err?.message || '网络异常'}`);
-    } finally {
-      running = false;
-      submitBtn.disabled = false;
-      submitText.textContent = '查询';
+      return { ...base, ok: false, ms: ms(), error: describeError(err) };
     }
   }
 
-  /* ---------- 一致性比对 ---------- */
+  /* ---------------- 一致性比对 ---------------- */
 
   function consensusOf(data) {
     return data.types.map((type) => {
@@ -86,10 +210,7 @@
       for (const resolver of data.resolvers) {
         const group = (resolver.groups || []).find((g) => g.type === type);
         if (!group || !group.ok) continue;
-        const key = group.answers
-          .map((a) => `${a.typeCode}:${a.data}`)
-          .sort()
-          .join('|');
+        const key = group.answers.map((a) => `${a.typeCode}:${a.data}`).sort().join('|');
         parts.push({ resolver, key, records: group.answers });
       }
 
@@ -117,21 +238,15 @@
     const fails = consensus.reduce((sum, c) => sum + c.failCount, 0);
 
     if (diffs.length) {
-      return {
-        html: `<span class="rounded-full border border-amber-400/30 bg-amber-400/10 px-2.5 py-1 text-[11px] font-medium text-amber-300">发现 ${diffs.length} 处差异</span>`,
-      };
+      return `<span class="rounded-full border border-amber-400/30 bg-amber-400/10 px-2.5 py-1 text-[11px] font-medium text-amber-300">发现 ${diffs.length} 处差异</span>`;
     }
     if (fails) {
-      return {
-        html: `<span class="rounded-full border border-white/15 bg-white/[0.06] px-2.5 py-1 text-[11px] font-medium text-slate-300">结果一致 · ${fails} 家不可用</span>`,
-      };
+      return `<span class="rounded-full border border-white/15 bg-white/[0.06] px-2.5 py-1 text-[11px] font-medium text-slate-300">结果一致 · ${fails} 家不可用</span>`;
     }
-    return {
-      html: `<span class="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-medium text-emerald-300">全部一致</span>`,
-    };
+    return `<span class="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-medium text-emerald-300">全部一致</span>`;
   }
 
-  /* ---------- 渲染 ---------- */
+  /* ---------------- 渲染 ---------------- */
 
   function renderRecord(record) {
     return `
@@ -159,11 +274,7 @@
         }
         <span class="rounded-full border px-1.5 py-[1px] text-[10px] font-medium ${pillClass}">${esc(group.ok ? group.statusText : 'ERROR')}</span>
         <span class="font-mono text-[10.5px] tabular-nums text-slate-500">${esc(group.ms)}ms</span>
-        ${
-          group.answers.length
-            ? `<span class="text-[10.5px] text-slate-500">${group.answers.length} 条</span>`
-            : ''
-        }
+        ${group.answers.length ? `<span class="text-[10.5px] text-slate-500">${group.answers.length} 条</span>` : ''}
       </div>`;
 
     if (!group.ok) {
@@ -177,11 +288,7 @@
       return `<div>${head}<p class="mt-1.5 rounded-md border border-dashed border-white/10 px-2.5 py-2 text-[11.5px] text-slate-500">该解析商未返回 ${esc(group.type)} 记录</p></div>`;
     }
 
-    return `
-      <div>
-        ${head}
-        <div class="mt-1 space-y-0.5">${group.answers.map(renderRecord).join('')}</div>
-      </div>`;
+    return `<div>${head}<div class="mt-1 space-y-0.5">${group.answers.map(renderRecord).join('')}</div></div>`;
   }
 
   function renderCard(resolver) {
@@ -201,7 +308,6 @@
 
   function renderSummary(data, consensus) {
     const okResolvers = data.resolvers.filter((r) => (r.groups || []).some((g) => g.ok)).length;
-    const badge = summaryBadge(consensus);
 
     const rows = consensus
       .filter((c) => c.buckets.length > 1 || c.failCount > 0)
@@ -235,7 +341,7 @@
           <span class="rounded border border-white/10 bg-white/[0.06] px-1.5 py-[1px] font-mono text-[10px] text-slate-400">${esc(data.types.join(' + '))}</span>
           <span class="text-[11.5px] text-slate-500">总耗时 ${esc(data.elapsed)}ms · ${okResolvers}/${data.resolvers.length} 家返回</span>
           <div class="ml-auto flex items-center gap-2">
-            ${badge.html}
+            ${summaryBadge(consensus)}
             <button type="button" id="export"
               class="rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[11px] text-slate-300 transition hover:border-white/25 hover:text-white">导出 JSON</button>
           </div>
@@ -244,18 +350,16 @@
       </div>`;
   }
 
+  function allFailed(data) {
+    return data.resolvers.every((r) => (r.groups || []).every((g) => !g.ok));
+  }
+
   function render(data) {
     const consensus = consensusOf(data);
     resultsEl.innerHTML = `
       ${renderSummary(data, consensus)}
-      <div class="mt-3 grid gap-3 md:grid-cols-2">
-        ${data.resolvers.map(renderCard).join('')}
-      </div>
-      ${allFailed(data) ? `<p class="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/[0.05] px-4 py-3 text-[12px] leading-relaxed text-rose-300/85">全部解析商均不可达。本地运行时多为境外 DoH 端点被当前网络阻断，可在 .env 中配置 HTTPS_PROXY 后重启；部署到 Cloudflare Worker 后不受此影响。</p>` : ''}`;
-  }
-
-  function allFailed(data) {
-    return data.resolvers.every((r) => (r.groups || []).every((g) => !g.ok));
+      <div class="mt-3 grid gap-3 md:grid-cols-2">${data.resolvers.map(renderCard).join('')}</div>
+      ${allFailed(data) ? `<p class="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/[0.05] px-4 py-3 text-[12px] leading-relaxed text-rose-300/85">所有解析商都失败了。查询由浏览器直接发出，若你的网络无法访问境外 DoH 端点，可先确认代理是否覆盖浏览器流量；阿里云通常仍可正常返回。</p>` : ''}`;
   }
 
   function renderLoading() {
@@ -274,7 +378,7 @@
         <span class="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-cyan-400/25 border-t-cyan-400"></span>
         <span class="text-[12.5px] text-slate-400">正在并发查询解析商…</span>
       </div>
-      <div class="mt-3 grid gap-3 md:grid-cols-2">${Array(5).fill(card).join('')}</div>`;
+      <div class="mt-3 grid gap-3 md:grid-cols-2">${Array(4).fill(card).join('')}</div>`;
   }
 
   function showError(message) {
@@ -287,7 +391,122 @@
       </div>`;
   }
 
-  /* ---------- 交互 ---------- */
+  /* ---------------- 交互 ---------------- */
+
+  const form = $('#query-form');
+  const domainInput = $('#domain');
+  const submitBtn = $('#submit');
+  const submitText = $('#submit-text');
+  const resultsEl = $('#results');
+
+  let currentType = 'A';
+  let lastQuery = null;
+  let lastData = null;
+  let running = false;
+
+  function selectedResolvers() {
+    return $$('#resolver-chips input')
+      .filter((box) => box.checked)
+      .map((box) => RESOLVERS.find((r) => r.id === box.value))
+      .filter(Boolean);
+  }
+
+  function renderResolverChips() {
+    const container = $('#resolver-chips');
+    container.innerHTML = RESOLVERS.map(
+      (r) => `
+        <label class="resolver-chip" data-id="${r.id}" data-on="true" title="${esc(r.name)} · ${esc(r.note)}">
+          <input type="checkbox" class="sr-only" name="resolver" value="${r.id}" checked />
+          <span class="h-1.5 w-1.5 shrink-0 rounded-full" style="background:${r.color}"></span>
+          <span>${esc(r.vendor)}</span>
+          <span class="font-mono text-[10px] font-normal text-slate-500">${esc(r.host)}</span>
+        </label>`,
+    ).join('');
+
+    $$('#resolver-chips label').forEach((label) => {
+      const box = $('input', label);
+      box.addEventListener('change', () => {
+        const checked = $$('#resolver-chips input').filter((b) => b.checked);
+        if (!checked.length) {
+          box.checked = true;
+          label.dataset.on = 'true';
+          showError('至少保留一家解析商');
+          return;
+        }
+        label.dataset.on = String(box.checked);
+      });
+    });
+  }
+
+  async function run(rawValue) {
+    if (running) return;
+
+    const value = String(rawValue ?? domainInput.value).trim();
+    if (!value) {
+      showError('请输入要查询的域名');
+      domainInput.focus();
+      return;
+    }
+
+    const name = normalizeDomain(value);
+    if (!name) {
+      showError('域名无效，请输入如 example.com 或 https://example.com/path');
+      return;
+    }
+
+    const resolvers = selectedResolvers();
+    if (!resolvers.length) {
+      showError('请至少选择一家解析商');
+      return;
+    }
+
+    const types = currentType === 'ALL' ? ALL_TYPES : [currentType];
+
+    running = true;
+    submitBtn.disabled = true;
+    submitText.textContent = '查询中';
+    renderLoading();
+
+    const started = performance.now();
+    lastQuery = { value, resolvers, types };
+
+    const tasks = [];
+    const owners = [];
+    for (const resolver of resolvers) {
+      for (const type of types) {
+        tasks.push(queryOne(resolver, name, type));
+        owners.push(resolver.id);
+      }
+    }
+
+    const groups = await Promise.all(tasks);
+    const elapsed = Math.round(performance.now() - started);
+
+    const byResolver = new Map();
+    groups.forEach((group, i) => {
+      const id = owners[i];
+      if (!byResolver.has(id)) byResolver.set(id, []);
+      byResolver.get(id).push(group);
+    });
+
+    const data = {
+      name,
+      types,
+      elapsed,
+      resolvers: resolvers.map((r) => {
+        const own = byResolver.get(r.id) || [];
+        return { ...r, ok: own.some((g) => g.ok), groups: own };
+      }),
+    };
+
+    lastData = data;
+    domainInput.value = name;
+    render(data);
+
+    running = false;
+    submitBtn.disabled = false;
+    submitText.textContent = '查询';
+  }
 
   $$('.type-chip').forEach((chip) => {
     chip.addEventListener('click', () => {
@@ -297,20 +516,6 @@
         c.dataset.on = String(c.dataset.type === currentType);
       });
       if (lastQuery) run(lastQuery.value);
-    });
-  });
-
-  $$('.resolver-chip').forEach((label) => {
-    const box = $('input', label);
-    box.addEventListener('change', () => {
-      const checked = $$('.resolver-chip input').filter((b) => b.checked);
-      if (!checked.length) {
-        box.checked = true;
-        label.dataset.on = 'true';
-        showError('至少保留一家解析商');
-        return;
-      }
-      label.dataset.on = String(box.checked);
     });
   });
 
@@ -340,30 +545,23 @@
         document.execCommand('copy');
         area.remove();
       }
-      const original = copyBtn.title;
-      copyBtn.title = '已复制';
       copyBtn.classList.add('text-cyan-300');
-      setTimeout(() => {
-        copyBtn.title = original;
-        copyBtn.classList.remove('text-cyan-300');
-      }, 1200);
+      setTimeout(() => copyBtn.classList.remove('text-cyan-300'), 1200);
       return;
     }
 
     if (event.target.closest('#export') && lastData) {
-      const blob = new Blob([JSON.stringify(lastData, null, 2)], {
-        type: 'application/json',
-      });
+      const blob = new Blob([JSON.stringify(lastData, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
-      const stamp = `${lastData.name}-${lastData.types.join('+')}`;
       link.href = url;
-      link.download = `dnsprobe-${stamp}.json`;
+      link.download = `dnsprobe-${lastData.name}-${lastData.types.join('+')}.json`;
       link.click();
       URL.revokeObjectURL(url);
     }
   });
 
+  renderResolverChips();
   domainInput.value = 'example.com';
   run('example.com');
 })();
