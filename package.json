@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build:css": "tailwindcss -i src/app.css -o public/styles.css --minify",
-    "deploy": "npx wrangler pages deploy public --project-name=dnsprobe"
+    "deploy": "npx wrangler deploy",
+    "deploy:pages": "npx wrangler pages deploy public --project-name=dnsprobe",
+    "preview:worker": "npx wrangler dev"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.1.14",

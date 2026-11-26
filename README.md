@@ -21,6 +21,7 @@ src/
   app.css        Tailwind 入口与自定义样式
 scripts/
   dev.mjs        静态服务器 + Tailwind watch
+wrangler.jsonc   Workers 部署配置（纯静态资源，无 Worker 脚本）
 ```
 
 ## 本地运行
@@ -64,14 +65,19 @@ npm run dev        # http://127.0.0.1:3000
 
 ## 部署
 
-纯静态，任意静态托管都能用。Cloudflare Pages：
+纯静态，任意静态托管都能用。仓库自带 `wrangler.jsonc`，走 Workers 的静态资源（Static Assets）模式：没有 `main`、也不绑定 `ASSETS`，请求直接由边缘返回文件，不经过任何 Worker 脚本。
 
 ```bash
-npm run build:css
-npm run deploy          # npx wrangler pages deploy public --project-name=dnsprobe
+npm run build:css        # 先重建样式
+npx wrangler login       # 首次需要授权
+npm run deploy           # = wrangler deploy → https://dnsprobe.<子域>.workers.dev
 ```
 
-或在控制台 **Workers & Pages → Create → Pages → Upload assets** 直接把 `public/` 拖进去。注意部署前先执行一次 `npm run build:css`，保证 `public/styles.css` 是最新的。
+想先本地验证 Worker 侧行为，`npm run preview:worker` 会起 `wrangler dev`，读同一份 `public/` 目录。
+
+如果偏好 Pages 那条路径，仍保留原脚本：`npm run deploy:pages`（`wrangler pages deploy public --project-name=dnsprobe`），或在控制台 **Workers & Pages → Create → Pages → Upload assets** 直接把 `public/` 拖进去。
+
+两种方式都注意部署前先 `npm run build:css`，`public/styles.css` 是构建产物但纳入了版本管理。
 
 ## 已知限制
 

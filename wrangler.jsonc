@@ -1,0 +1,9 @@
+{
+  // 纯静态站点：不挂 Worker 脚本，全部请求由静态资源直接响应
+  // 部署：npx wrangler deploy   （首次需先 npx wrangler login）
+  "name": "dnsprobe",
+  "compatibility_date": "2026-11-25",
+  "assets": {
+    "directory": "./public"
+  }
+}
