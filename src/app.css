@@ -1,0 +1,148 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink-950: #070a12;
+  --color-ink-900: #0b1020;
+  --color-ink-800: #101a30;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Mono", Menlo,
+    Consolas, monospace;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+  }
+
+  body {
+    text-rendering: optimizeLegibility;
+  }
+}
+
+/* 顶部网格底纹，仅在页面上方渐隐出现 */
+@utility bg-grid {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(ellipse 82% 55% at 50% 0%, #000 18%, transparent 76%);
+  mask-image: radial-gradient(ellipse 82% 55% at 50% 0%, #000 18%, transparent 76%);
+}
+
+@layer components {
+  .type-chip {
+    display: inline-flex;
+    height: 1.75rem;
+    align-items: center;
+    padding: 0 0.625rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0.5rem;
+    background: rgba(255, 255, 255, 0.03);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1;
+    color: #cbd5e1;
+    cursor: pointer;
+    transition: color 0.16s ease, background-color 0.16s ease, border-color 0.16s ease;
+  }
+
+  .type-chip:hover {
+    border-color: rgba(255, 255, 255, 0.22);
+    color: #fff;
+  }
+
+  .type-chip[data-on="true"] {
+    border-color: rgba(34, 211, 238, 0.5);
+    background: rgba(34, 211, 238, 0.1);
+    box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.12);
+    color: #a5f3fc;
+  }
+
+  .type-chip:focus-visible,
+  .resolver-chip:focus-within {
+    outline: 2px solid rgba(34, 211, 238, 0.45);
+    outline-offset: 2px;
+  }
+
+  .resolver-chip {
+    display: inline-flex;
+    height: 1.75rem;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0 0.625rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0.5rem;
+    background: rgba(255, 255, 255, 0.03);
+    font-size: 11.5px;
+    line-height: 1;
+    color: #cbd5e1;
+    cursor: pointer;
+    transition: color 0.16s ease, background-color 0.16s ease, border-color 0.16s ease,
+      opacity 0.16s ease;
+  }
+
+  .resolver-chip:hover {
+    border-color: rgba(255, 255, 255, 0.22);
+  }
+
+  .resolver-chip[data-on="true"] {
+    border-color: rgba(255, 255, 255, 0.26);
+    background: rgba(255, 255, 255, 0.075);
+    color: #fff;
+  }
+
+  .resolver-chip[data-on="false"] {
+    opacity: 0.42;
+  }
+
+  .example {
+    border-bottom: 1px dashed rgba(255, 255, 255, 0.16);
+    padding-bottom: 1px;
+    color: #94a3b8;
+    transition: color 0.16s ease, border-color 0.16s ease;
+  }
+
+  .example:hover {
+    border-color: rgba(34, 211, 238, 0.55);
+    color: #67e8f9;
+  }
+}
+
+/* 骨架屏微光 */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.07),
+    transparent
+  );
+  transform: translateX(-100%);
+  animation: skeleton-sweep 1.35s ease-in-out infinite;
+}
+
+@keyframes skeleton-sweep {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+  }
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+.wrangler-build/
+dist/
+.idea/
+.env
+*.log

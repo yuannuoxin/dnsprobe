@@ -1,0 +1,9 @@
+name = "dnsprobe"
+main = "src/worker.ts"
+compatibility_date = "2026-01-01"
+
+# public/ 作为静态资源，绑定为 env.ASSETS；/styles.css 与 /app.js 由它兜底
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true

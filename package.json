@@ -1,0 +1,27 @@
+{
+  "name": "dnsprobe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DNS Probe · 多解析商 DoH 解析对比",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:css": "tailwindcss -i src/app.css -o public/styles.css --watch",
+    "build:css": "tailwindcss -i src/app.css -o public/styles.css --minify",
+    "start": "tsx src/index.ts",
+    "dry": "wrangler deploy --dry-run --outdir=.wrangler-build",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.5",
+    "hono": "^4.9.10",
+    "undici": "^8.13.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.14",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.42.0"
+  }
+}
