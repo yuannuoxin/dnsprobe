@@ -146,6 +146,34 @@
     return err?.message || '查询失败';
   }
 
+  /** 轻量 JSON 着色：先按 token 切分，再逐个转义，避免破坏字符串内容 */
+  function highlightJson(text) {
+    const pattern = /("(?:[^"\\]|\\.)*")(\s*:)?|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|\b(true|false|null)\b/g;
+    let out = '';
+    let last = 0;
+    let match;
+
+    while ((match = pattern.exec(text)) !== null) {
+      out += esc(text.slice(last, match.index));
+
+      if (match[1] !== undefined) {
+        if (match[2] !== undefined) {
+          out += `<span class="text-cyan-300">${esc(match[1])}</span><span class="text-slate-500">${esc(match[2])}</span>`;
+        } else {
+          out += `<span class="text-emerald-300">${esc(match[1])}</span>`;
+        }
+      } else if (match[3] !== undefined) {
+        out += `<span class="text-sky-300">${esc(match[3])}</span>`;
+      } else {
+        out += `<span class="text-violet-300">${esc(match[4])}</span>`;
+      }
+
+      last = match.index + match[0].length;
+    }
+
+    return out + esc(text.slice(last));
+  }
+
   /* ---------------- 查询 ---------------- */
 
   async function queryOne(resolver, name, type) {
@@ -342,11 +370,34 @@
           <span class="text-[11.5px] text-slate-500">总耗时 ${esc(data.elapsed)}ms · ${okResolvers}/${data.resolvers.length} 家返回</span>
           <div class="ml-auto flex items-center gap-2">
             ${summaryBadge(consensus)}
-            <button type="button" id="export"
-              class="rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[11px] text-slate-300 transition hover:border-white/25 hover:text-white">导出 JSON</button>
           </div>
         </div>
         ${rows}
+      </div>`;
+  }
+
+  function renderJsonPanel(data) {
+    const json = JSON.stringify(data, null, 2);
+    const size = (JSON.stringify(data).length / 1024).toFixed(1);
+    const stamps = data.resolvers.reduce(
+      (sum, r) => sum + (r.groups || []).reduce((n, g) => n + g.answers.length, 0),
+      0,
+    );
+
+    return `
+      <div class="mt-3 overflow-hidden rounded-2xl border border-white/10 bg-ink-900/50">
+        <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-white/5 px-4 py-2.5">
+          <span class="text-[12px] font-medium text-slate-300">原始 JSON</span>
+          <span class="font-mono text-[10.5px] text-slate-500">${size} KB · ${stamps} 条记录</span>
+          <button type="button" id="copy-json"
+            class="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[11px] text-slate-300 transition hover:border-white/25 hover:text-white">
+            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+              <rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 5.5A2.5 2.5 0 0 0 12.5 3H6a3 3 0 0 0-3 3v6.5A2.5 2.5 0 0 0 5.5 15"></path>
+            </svg>
+            <span id="copy-json-label">复制</span>
+          </button>
+        </div>
+        <pre class="max-h-[420px] overflow-auto bg-ink-950/60 px-4 py-3 font-mono text-[11.5px] leading-[1.7] text-slate-300">${highlightJson(json)}</pre>
       </div>`;
   }
 
@@ -359,7 +410,8 @@
     resultsEl.innerHTML = `
       ${renderSummary(data, consensus)}
       <div class="mt-3 grid gap-3 md:grid-cols-2">${data.resolvers.map(renderCard).join('')}</div>
-      ${allFailed(data) ? `<p class="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/[0.05] px-4 py-3 text-[12px] leading-relaxed text-rose-300/85">所有解析商都失败了。查询由浏览器直接发出，若你的网络无法访问境外 DoH 端点，可先确认代理是否覆盖浏览器流量；阿里云通常仍可正常返回。</p>` : ''}`;
+      ${allFailed(data) ? `<p class="mt-3 rounded-xl border border-rose-500/20 bg-rose-500/[0.05] px-4 py-3 text-[12px] leading-relaxed text-rose-300/85">所有解析商都失败了。查询由浏览器直接发出，若你的网络无法访问境外 DoH 端点，可先确认代理是否覆盖浏览器流量；阿里云通常仍可正常返回。</p>` : ''}
+      ${renderJsonPanel(data)}`;
   }
 
   function renderLoading() {
@@ -531,33 +583,42 @@
     run(domainInput.value);
   });
 
+  async function copyText(value) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      const area = document.createElement('textarea');
+      area.value = value;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      area.remove();
+      return true;
+    }
+  }
+
   resultsEl.addEventListener('click', async (event) => {
     const copyBtn = event.target.closest('.copy-btn');
     if (copyBtn) {
-      const value = copyBtn.dataset.copy || '';
-      try {
-        await navigator.clipboard.writeText(value);
-      } catch {
-        const area = document.createElement('textarea');
-        area.value = value;
-        document.body.appendChild(area);
-        area.select();
-        document.execCommand('copy');
-        area.remove();
+      if (await copyText(copyBtn.dataset.copy || '')) {
+        copyBtn.classList.add('text-cyan-300');
+        setTimeout(() => copyBtn.classList.remove('text-cyan-300'), 1200);
       }
-      copyBtn.classList.add('text-cyan-300');
-      setTimeout(() => copyBtn.classList.remove('text-cyan-300'), 1200);
       return;
     }
 
-    if (event.target.closest('#export') && lastData) {
-      const blob = new Blob([JSON.stringify(lastData, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `dnsprobe-${lastData.name}-${lastData.types.join('+')}.json`;
-      link.click();
-      URL.revokeObjectURL(url);
+    const jsonBtn = event.target.closest('#copy-json');
+    if (jsonBtn && lastData) {
+      if (await copyText(JSON.stringify(lastData, null, 2))) {
+        const label = $('#copy-json-label');
+        if (label) {
+          label.textContent = '已复制';
+          setTimeout(() => {
+            label.textContent = '复制';
+          }, 1200);
+        }
+      }
     }
   });
 
